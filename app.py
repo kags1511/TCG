@@ -361,18 +361,18 @@ if uploaded:
             with zipfile.ZipFile(uploaded) as z:
                 z.extractall(tmpdir)
 
-        # check at least one log file exists
-        log_files = [
-            os.path.join(root, f)
-            for root, _, files in os.walk(tmpdir)
-            for f in files
-            if f.endswith(".json") or f.endswith(".json.gz")
-        ]
-        if not log_files:
+        # find the directory that actually contains the .json/.json.gz files
+        # (may be nested e.g. logs_out/game_*.json.gz)
+        log_dir = tmpdir
+        for root, _, files in os.walk(tmpdir):
+            if any(f.endswith(".json") or f.endswith(".json.gz") for f in files):
+                log_dir = root
+                break
+        else:
             st.error("No .json or .json.gz files found in the archive.")
             st.stop()
 
-        df = parse_many(tmpdir)
+        df = parse_many(log_dir)
 
     if df.empty:
         st.error("Parsed 0 rows — check that the archive contains valid game logs.")
