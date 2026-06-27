@@ -6,7 +6,6 @@ all_games.parquet
 
 # model weights
 *.pth
-model 2/
 
 # logs
 out/
