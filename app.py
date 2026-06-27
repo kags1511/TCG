@@ -17,7 +17,9 @@ Deploy free on Streamlit Community Cloud:
 
 import io
 import os
+import re
 import sys
+import tarfile
 import tempfile
 import zipfile
 
@@ -236,63 +238,172 @@ def generate_ratio_plots(df, zout):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+# Return / reward-over-training plots
+# ══════════════════════════════════════════════════════════════════════════════
+
+def generate_return_plots(df, zout):
+    # per-game summary — both players aggregated
+    per_game = df.groupby("game_id").agg(
+        G=("reward_total", "sum"),
+        outcome=("outcome", "first"),
+        n_steps=("step_index", "count"),
+        max_turn=("turn", "max"),
+        total_prizes_gained=("prize_gained", "sum"),
+        total_damage=("damage_dealt", "sum"),
+    ).reset_index()
+
+    per_game["gnum"] = per_game["game_id"].str.extract(r"(\d+)").astype(int)
+    per_game = per_game.sort_values("gnum").reset_index(drop=True)
+    per_game["win"] = (per_game["outcome"] > 0).astype(float)
+
+    n = len(per_game)
+    window = max(10, n // 20)   # rolling window ~ 5 % of games
+    x = per_game["gnum"].values
+
+    # ── Plot 1: G (cumulative reward) per game with rolling mean ─────────────
+    fig, ax = plt.subplots(figsize=(11, 4))
+    ax.scatter(x, per_game["G"], alpha=0.25, s=6, color="#4C72B0", label="G per game")
+    rolled_G = per_game["G"].rolling(window, min_periods=1).mean()
+    ax.plot(x, rolled_G, color="#C44E52", linewidth=2,
+            label=f"rolling mean (w={window})")
+    ax.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+    ax.set_title("Return G per game over training", fontsize=13, fontweight="bold")
+    ax.set_xlabel("Game number"); ax.set_ylabel("G  (sum of step rewards)")
+    ax.legend(fontsize=9); fig.tight_layout()
+    _savefig_to_zip(fig, zout, "returns/01_G_over_training.png")
+
+    # ── Plot 2: rolling win rate ──────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(11, 4))
+    rolled_win = per_game["win"].rolling(window, min_periods=1).mean()
+    ax.plot(x, rolled_win, color="#4C72B0", linewidth=2)
+    ax.axhline(0.5, color="#C44E52", linestyle="--", linewidth=1, label="50% baseline")
+    ax.fill_between(x, rolled_win, 0.5,
+                    where=(rolled_win >= 0.5), alpha=0.15, color="#55A868")
+    ax.fill_between(x, rolled_win, 0.5,
+                    where=(rolled_win < 0.5),  alpha=0.15, color="#C44E52")
+    ax.set_ylim(0, 1)
+    ax.set_title(f"Win rate over training  (rolling w={window})", fontsize=13, fontweight="bold")
+    ax.set_xlabel("Game number"); ax.set_ylabel("Win rate")
+    ax.legend(fontsize=9); fig.tight_layout()
+    _savefig_to_zip(fig, zout, "returns/02_win_rate_over_training.png")
+
+    # ── Plot 3: game length (turns) over training ─────────────────────────────
+    fig, ax = plt.subplots(figsize=(11, 4))
+    ax.scatter(x, per_game["max_turn"], alpha=0.2, s=6, color="#DD8452")
+    rolled_len = per_game["max_turn"].rolling(window, min_periods=1).mean()
+    ax.plot(x, rolled_len, color="#8172B2", linewidth=2,
+            label=f"rolling mean (w={window})")
+    ax.set_title("Game length (turns) over training", fontsize=13, fontweight="bold")
+    ax.set_xlabel("Game number"); ax.set_ylabel("Turns")
+    ax.legend(fontsize=9); fig.tight_layout()
+    _savefig_to_zip(fig, zout, "returns/03_game_length_over_training.png")
+
+    # ── Plot 4: prizes taken per game over training ───────────────────────────
+    fig, ax = plt.subplots(figsize=(11, 4))
+    ax.scatter(x, per_game["total_prizes_gained"], alpha=0.2, s=6, color="#55A868")
+    rolled_pr = per_game["total_prizes_gained"].rolling(window, min_periods=1).mean()
+    ax.plot(x, rolled_pr, color="#C44E52", linewidth=2,
+            label=f"rolling mean (w={window})")
+    ax.set_title("Total prizes taken per game over training", fontsize=13, fontweight="bold")
+    ax.set_xlabel("Game number"); ax.set_ylabel("Prizes taken (both players)")
+    ax.legend(fontsize=9); fig.tight_layout()
+    _savefig_to_zip(fig, zout, "returns/04_prizes_over_training.png")
+
+    # ── Plot 5: G distribution — first half vs second half ───────────────────
+    fig, ax = plt.subplots(figsize=(9, 4))
+    half = n // 2
+    g1 = per_game.iloc[:half]["G"]
+    g2 = per_game.iloc[half:]["G"]
+    bins = np.linspace(
+        min(g1.min(), g2.min()), max(g1.max(), g2.max()), 40
+    )
+    ax.hist(g1, bins=bins, alpha=0.6, color="#4C72B0", label=f"first half (g1–{x[half-1]})")
+    ax.hist(g2, bins=bins, alpha=0.6, color="#C44E52", label=f"second half (g{x[half]}–{x[-1]})")
+    ax.axvline(float(g1.median()), color="#4C72B0", linestyle="--", linewidth=1.2)
+    ax.axvline(float(g2.median()), color="#C44E52", linestyle="--", linewidth=1.2)
+    ax.set_title("G distribution: first half vs second half of training",
+                 fontsize=13, fontweight="bold")
+    ax.set_xlabel("G"); ax.set_ylabel("Games"); ax.legend(fontsize=9)
+    fig.tight_layout()
+    _savefig_to_zip(fig, zout, "returns/05_G_distribution_halves.png")
+
+    return 5
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 # Streamlit UI
 # ══════════════════════════════════════════════════════════════════════════════
 st.set_page_config(page_title="TCG Plot Generator", page_icon="🎴", layout="centered")
 
 st.title("🎴 TCG Plot Generator")
 st.markdown(
-    "Upload a **ZIP of game logs** (`game_*.json` or `game_*.json.gz`) "
-    "and download all **10 behavioral + 28 ratio plots** in one ZIP."
+    "Upload a **ZIP or tar.gz of game logs** (`game_*.json` or `game_*.json.gz`) "
+    "and download all **10 behavioral + 28 ratio + 5 return plots** in one ZIP."
 )
 
-uploaded = st.file_uploader("Choose a logs ZIP file", type="zip")
+uploaded = st.file_uploader(
+    "Choose a logs archive (.zip or .tar.gz)",
+    type=["zip", "gz", "tar"],
+)
 
 if uploaded:
     status = st.empty()
 
     # ── Step 1: extract & parse ───────────────────────────────────────────────
-    status.info("Step 1/3 — Extracting and parsing logs…")
+    status.info("Step 1/4 — Extracting and parsing logs…")
+    fname = uploaded.name.lower()
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        with zipfile.ZipFile(uploaded) as z:
-            z.extractall(tmpdir)
+        if fname.endswith(".tar.gz") or fname.endswith(".tgz") or fname.endswith(".tar"):
+            with tarfile.open(fileobj=uploaded, mode="r:*") as tar:
+                tar.extractall(tmpdir)
+        else:
+            with zipfile.ZipFile(uploaded) as z:
+                z.extractall(tmpdir)
 
-        # flatten one level of nesting (e.g. logs/game_*.json.gz)
-        log_files = []
-        for root, _, files in os.walk(tmpdir):
-            for f in files:
-                if f.endswith(".json") or f.endswith(".json.gz"):
-                    log_files.append(os.path.join(root, f))
-
+        # check at least one log file exists
+        log_files = [
+            os.path.join(root, f)
+            for root, _, files in os.walk(tmpdir)
+            for f in files
+            if f.endswith(".json") or f.endswith(".json.gz")
+        ]
         if not log_files:
-            st.error("No .json or .json.gz files found inside the ZIP. "
-                     "Make sure the ZIP contains the game log files directly.")
+            st.error("No .json or .json.gz files found in the archive.")
             st.stop()
 
         df = parse_many(tmpdir)
 
     if df.empty:
-        st.error("Parsed 0 rows — check that the ZIP contains valid game logs.")
+        st.error("Parsed 0 rows — check that the archive contains valid game logs.")
         st.stop()
 
     df = add_reward_components(df, weights=DENSE)
     df = add_tactical_flags(df)
 
     n_games = int(df["game_id"].nunique())
-    status.success(f"Step 1/3 done — {n_games:,} games, {len(df):,} decisions parsed.")
+    status.success(f"Step 1/4 done — {n_games:,} games, {len(df):,} decisions parsed.")
 
-    # ── Step 2: generate all plots ────────────────────────────────────────────
-    status.info("Step 2/3 — Generating 10 behavioral plots…")
+    # ── Step 2: behavioral plots ──────────────────────────────────────────────
+    status.info("Step 2/4 — Generating 10 behavioral plots…")
     out_buf = io.BytesIO()
     with zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as zout:
         n_beh = generate_behavior_plots(df, zout)
-        status.info("Step 3/3 — Generating 28 ratio histograms…")
+
+        # ── Step 3: ratio plots ───────────────────────────────────────────────
+        status.info("Step 3/4 — Generating 28 ratio histograms…")
         n_rat = generate_ratio_plots(df, zout)
 
-    total = n_beh + n_rat
-    status.success(f"Done — {n_beh} behavioral + {n_rat} ratio plots generated ({total} total).")
+        # ── Step 4: return / reward-over-training plots ───────────────────────
+        status.info("Step 4/4 — Generating 5 return / reward-over-training plots…")
+        n_ret = generate_return_plots(df, zout)
 
-    # ── Step 3: download button ───────────────────────────────────────────────
+    total = n_beh + n_rat + n_ret
+    status.success(
+        f"Done — {n_beh} behavioral + {n_rat} ratio + {n_ret} return plots  ({total} total)."
+    )
+
+    # ── Download button ───────────────────────────────────────────────────────
     st.download_button(
         label=f"⬇️  Download all {total} plots (ZIP)",
         data=out_buf.getvalue(),
@@ -304,14 +415,19 @@ if uploaded:
         "**ZIP layout:**\n"
         "```\n"
         "tcg_plots.zip\n"
-        "├── behavior/\n"
+        "├── behavior/          (10 plots)\n"
         "│   ├── A1_could_attack_outcome.png\n"
-        "│   ├── A2_attack_rate_by_turn.png\n"
-        "│   └── … (10 total)\n"
-        "└── ratio/\n"
-        "    ├── all/PLAY.png … RETREAT.png\n"
-        "    ├── first_half/…\n"
-        "    ├── third_quarter/…\n"
-        "    └── last_quarter/… (28 total)\n"
+        "│   └── …\n"
+        "├── ratio/             (28 plots — 7 actions × 4 slices)\n"
+        "│   ├── all/\n"
+        "│   ├── first_half/\n"
+        "│   ├── third_quarter/\n"
+        "│   └── last_quarter/\n"
+        "└── returns/           (5 plots)\n"
+        "    ├── 01_G_over_training.png\n"
+        "    ├── 02_win_rate_over_training.png\n"
+        "    ├── 03_game_length_over_training.png\n"
+        "    ├── 04_prizes_over_training.png\n"
+        "    └── 05_G_distribution_halves.png\n"
         "```"
     )
