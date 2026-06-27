@@ -1,0 +1,18 @@
+# data / outputs
+outputs/
+wandb/
+all_games.parquet
+*.parquet
+
+# model weights
+*.pth
+model 2/
+
+# logs
+out/
+*.json.gz
+
+# Python
+__pycache__/
+*.pyc
+.env
